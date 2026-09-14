@@ -1,0 +1,8 @@
+{
+  "name": "line-personal-assistant",
+  "version": "1.0.0",
+  "description": "Personal AI assistant agent — scheduled reviews + two-way LINE conversation",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0"
+  }
+}

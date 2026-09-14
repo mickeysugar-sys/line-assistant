@@ -1,0 +1,7 @@
+[build]
+  functions = "netlify/functions"
+
+# Runs 3x/day: 8am, 1pm, 6pm Bangkok time (UTC+7) -> 01:00, 06:00, 11:00 UTC
+# Adjust to taste. Netlify scheduled functions use standard cron syntax.
+[functions."scheduled-check"]
+  schedule = "0 1,6,11 * * *"
