@@ -23,11 +23,18 @@ exports.handler = async (event) => {
     return { statusCode: 405, body: "Method Not Allowed" };
   }
 
+  // Netlify sometimes delivers the raw request body base64-encoded
+  // (depending on content-type handling). Decode it first so the
+  // signature is computed over the exact bytes LINE originally sent.
+  const rawBody = event.isBase64Encoded
+    ? Buffer.from(event.body, "base64").toString("utf8")
+    : event.body;
+
   // 1. Verify the request signature (protects against spoofed webhooks)
   const signature = event.headers["x-line-signature"];
   const expected = crypto
     .createHmac("SHA256", LINE_CHANNEL_SECRET)
-    .update(event.body)
+    .update(rawBody)
     .digest("base64");
 
   if (signature !== expected) {
@@ -35,7 +42,7 @@ exports.handler = async (event) => {
     return { statusCode: 401, body: "Invalid signature" };
   }
 
-  const body = JSON.parse(event.body);
+  const body = JSON.parse(rawBody);
 
   // Process each event (usually just one per webhook call)
   for (const lineEvent of body.events || []) {
