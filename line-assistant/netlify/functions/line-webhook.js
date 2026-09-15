@@ -81,6 +81,12 @@ async function handleTextMessage(lineEvent) {
     .eq("status", "open")
     .order("created_at", { ascending: false });
 
+  const { data: standingInstructions } = await supabase
+    .from("standing_instructions")
+    .select("id, instruction, created_at")
+    .eq("status", "active")
+    .order("created_at", { ascending: false });
+
   const history = (recentMessages || [])
     .reverse()
     .map((m) => `${m.role}: ${m.content}`)
@@ -90,15 +96,41 @@ async function handleTextMessage(lineEvent) {
     .map((i) => `- ${i.summary}`)
     .join("\n") || "(none currently open)";
 
-  // 4. Ask Claude for a reply
-  const claudeReply = await callClaude(history, userText, openItemsText);
+  const standingInstructionsText = (standingInstructions || [])
+    .map((i) => `- [#${i.id}] ${i.instruction}`)
+    .join("\n") || "(none yet)";
+
+  // 4. Ask Claude for a reply, plus a structured decision on whether this
+  // message adds, removes, or doesn't touch a standing instruction.
+  const { reply, newInstruction, removeInstructionId } = await callClaude(
+    history,
+    userText,
+    openItemsText,
+    standingInstructionsText
+  );
 
   // 5. Log the assistant's reply
   await supabase.from("conversation_log").insert({
     role: "assistant",
-    content: claudeReply,
+    content: reply,
     line_user_id: userId,
   });
+
+  // 5b. Save a new standing instruction if Claude identified one
+  if (newInstruction) {
+    await supabase.from("standing_instructions").insert({
+      instruction: newInstruction,
+      status: "active",
+    });
+  }
+
+  // 5c. Retire a standing instruction if the user asked to stop watching it
+  if (removeInstructionId) {
+    await supabase
+      .from("standing_instructions")
+      .update({ status: "retired" })
+      .eq("id", removeInstructionId);
+  }
 
   // 6. Send it back via the free Reply API (uses replyToken, not push)
   await fetch("https://api.line.me/v2/bot/message/reply", {
@@ -109,20 +141,35 @@ async function handleTextMessage(lineEvent) {
     },
     body: JSON.stringify({
       replyToken,
-      messages: [{ type: "text", text: claudeReply }],
+      messages: [{ type: "text", text: reply }],
     }),
   });
 }
 
-async function callClaude(history, userText, openItemsText) {
+async function callClaude(history, userText, openItemsText, standingInstructionsText) {
   const systemPrompt = `You are Mark's personal assistant, talking to him over LINE.
 Be direct and concise — match his preference for short, clear replies, no fluff.
 
 Currently open/flagged items you raised earlier:
 ${openItemsText}
 
+Standing instructions Mark has given you to watch for on an ongoing basis
+(each has an id in brackets, e.g. [#3]):
+${standingInstructionsText}
+
 Recent conversation:
-${history}`;
+${history}
+
+Reply with ONLY a JSON object, no preamble, no markdown fences:
+{
+  "reply": "the message to send back to Mark on LINE",
+  "new_instruction": "a short standing instruction to save, or null if this message wasn't asking you to watch/remember something new",
+  "remove_instruction_id": the numeric id to retire if Mark asked you to stop watching something, or null
+}
+
+Only set new_instruction when Mark is clearly giving you something to track
+going forward (e.g. "keep an eye on X", "let me know if Y happens", "remind me about Z").
+Ordinary questions or chat should have new_instruction: null.`;
 
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -141,5 +188,20 @@ ${history}`;
 
   const data = await response.json();
   const textBlock = (data.content || []).find((b) => b.type === "text");
-  return textBlock ? textBlock.text : "Sorry, I hit an error processing that.";
+
+  if (!textBlock) {
+    return { reply: "Sorry, I hit an error processing that.", newInstruction: null, removeInstructionId: null };
+  }
+
+  try {
+    const parsed = JSON.parse(textBlock.text);
+    return {
+      reply: parsed.reply || "Got it.",
+      newInstruction: parsed.new_instruction || null,
+      removeInstructionId: parsed.remove_instruction_id || null,
+    };
+  } catch {
+    // Fallback: if Claude didn't return valid JSON, just use the raw text as the reply
+    return { reply: textBlock.text, newInstruction: null, removeInstructionId: null };
+  }
 }
