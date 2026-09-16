@@ -161,10 +161,13 @@ async function evaluateAndDraft(standingInstructions, calendarEvents) {
     },
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
-      max_tokens: 500,
+      max_tokens: 1500,
       system: `You review information on Mark's behalf and decide if anything
 needs his attention right now. Be conservative — only flag things that are
-genuinely actionable or time-sensitive. Reply ONLY with JSON, no preamble:
+genuinely actionable or time-sensitive. You have a web search tool — use it
+if a standing instruction asks you to research or check on something that
+requires current information. Reply with ONLY JSON as your final message,
+no preamble, no markdown fences:
 {"shouldNotify": boolean, "message": "the LINE message to send, direct and concise", "flaggedSummaries": ["short summary 1", ...]}`,
       messages: [
         {
@@ -176,11 +179,13 @@ Calendar events in the next 24 hours:
 ${eventsText}`,
         },
       ],
+      tools: [{ type: "web_search_20250305", name: "web_search" }],
     }),
   });
 
   const data = await response.json();
-  const textBlock = (data.content || []).find((b) => b.type === "text");
+  const textBlocks = (data.content || []).filter((b) => b.type === "text");
+  const textBlock = textBlocks[textBlocks.length - 1];
   try {
     return JSON.parse(textBlock.text);
   } catch {

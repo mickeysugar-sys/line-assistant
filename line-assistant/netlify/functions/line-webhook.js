@@ -169,7 +169,13 @@ Reply with ONLY a JSON object, no preamble, no markdown fences:
 
 Only set new_instruction when Mark is clearly giving you something to track
 going forward (e.g. "keep an eye on X", "let me know if Y happens", "remind me about Z").
-Ordinary questions or chat should have new_instruction: null.`;
+Ordinary questions or chat should have new_instruction: null.
+
+You have a web search tool — use it whenever answering well requires current
+information (news, prices, recent events, anything that could have changed
+recently, or anything you're not confident about from memory alone). After
+searching, still reply with ONLY the JSON object described above as your
+final message — no extra commentary outside it.`;
 
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -180,14 +186,19 @@ Ordinary questions or chat should have new_instruction: null.`;
     },
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
-      max_tokens: 600,
+      max_tokens: 1500,
       system: systemPrompt,
       messages: [{ role: "user", content: userText }],
+      tools: [{ type: "web_search_20250305", name: "web_search" }],
     }),
   });
 
   const data = await response.json();
-  const textBlock = (data.content || []).find((b) => b.type === "text");
+  // With web search enabled, the response can include search/tool blocks
+  // before the final answer — take the LAST text block, which is Claude's
+  // final reply after any searching is done.
+  const textBlocks = (data.content || []).filter((b) => b.type === "text");
+  const textBlock = textBlocks[textBlocks.length - 1];
 
   if (!textBlock) {
     return { reply: "Sorry, I hit an error processing that.", newInstruction: null, removeInstructionId: null };
