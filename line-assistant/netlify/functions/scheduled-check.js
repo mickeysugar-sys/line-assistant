@@ -152,6 +152,9 @@ async function evaluateAndDraft(standingInstructions, calendarEvents) {
         .map((e) => `- ${e.summary} (${e.start} - ${e.end})${e.location ? ` @ ${e.location}` : ""}`)
         .join("\n") || "(no events in the next 24 hours)";
 
+        const nowBangkok = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Bangkok" }));
+    const nowText = nowBangkok.toLocaleString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: "Asia/Bangkok" });
+
   const response = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: {
@@ -165,6 +168,11 @@ async function evaluateAndDraft(standingInstructions, calendarEvents) {
                 system: `You review information on Mark's behalf and decide if anything
                 needs his attention right now. Be conservative — only flag things that are
                 genuinely actionable or time-sensitive.
+
+      The current date/time in Bangkok is: ${nowText}. Use this to evaluate any
+      standing instruction that's conditional on a day of week, date, or month
+      (e.g. "every Thursday", "every July") — only treat it as due if today
+      actually matches.
 
                 Note: this scheduled check runs on a tight time budget (no web search here —
                 that's only available when Mark messages the bot directly in LINE). Judge
