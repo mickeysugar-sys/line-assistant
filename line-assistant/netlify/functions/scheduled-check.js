@@ -153,7 +153,7 @@ async function evaluateAndDraft(standingInstructions, calendarEvents) {
         .join("\n") || "(no events in the next 24 hours)";
 
         const nowBangkok = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Bangkok" }));
-    const nowText = nowBangkok.toLocaleString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: "Asia/Bangkok" });
+    const nowText = new Date().toLocaleString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: "Asia/Bangkok" });
 
   const response = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
