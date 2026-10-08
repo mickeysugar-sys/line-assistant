@@ -5,3 +5,8 @@
 # Adjust to taste. Netlify scheduled functions use standard cron syntax.
 [functions."scheduled-check"]
   schedule = "0 1,6,11 * * *"
+
+# Daily 9am Bangkok (02:00 UTC): kicks off research-background for
+# research-type standing instructions (monthly searches, show reminders).
+[functions."research-trigger"]
+schedule = "0 2 * * *"
