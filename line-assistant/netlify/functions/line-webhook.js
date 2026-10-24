@@ -260,7 +260,7 @@ async function callClaude(history, userText, openItemsText, standingInstructions
         },
         body: JSON.stringify({
                 model: "claude-sonnet-4-6",
-                max_tokens: 1500,
+                max_tokens: 2000,
                 system: systemPrompt,
                 messages: [{ role: "user", content: userText }],
                 tools: [{ type: "web_search_20250305", name: "web_search" }],
@@ -278,15 +278,37 @@ async function callClaude(history, userText, openItemsText, standingInstructions
         return { reply: "Sorry, I hit an error processing that.", newInstruction: null, removeInstructionId: null };
   }
 
-  try {
-        const parsed = JSON.parse(textBlock.text);
+  return parseReply(textBlock.text);
+}
+
+// Claude is asked for JSON, but sometimes wraps it in fences/commentary or gets
+// cut off. Pull the fields out robustly so Mark never sees raw JSON.
+function parseReply(raw) {
+  const text = String(raw || "").trim();
+  const clean = text.replace(/```(?:json)?/gi, "").trim();
+  const candidates = [clean];
+  const a = clean.indexOf("{");
+  const b = clean.lastIndexOf("}");
+  if (a !== -1 && b > a) candidates.push(clean.slice(a, b + 1));
+  for (const c of candidates) {
+    try {
+      const p = JSON.parse(c);
+      if (p && typeof p === "object") {
         return {
-                reply: parsed.reply || "Got it.",
-                newInstruction: parsed.new_instruction || null,
-                removeInstructionId: parsed.remove_instruction_id || null,
+          reply: p.reply || "Got it.",
+          newInstruction: p.new_instruction || null,
+          removeInstructionId: p.remove_instruction_id || null,
         };
-  } catch {
-        // Fallback: if Claude didn't return valid JSON, just use the raw text as the reply
-      return { reply: textBlock.text, newInstruction: null, removeInstructionId: null };
+      }
+    } catch {}
   }
+  // Truncated or malformed JSON: grab just the reply string.
+  const m = clean.match(/"reply"\s*:\s*"((?:[^"\\]|\\.)*)/);
+  if (m) {
+    let r = m[1];
+    try { r = JSON.parse('"' + r + '"'); } catch { r = r.replace(/\\n/g, "\n").replace(/\\"/g, '"'); }
+    return { reply: r, newInstruction: null, removeInstructionId: null };
+  }
+  // Plain prose: send as-is.
+  return { reply: text, newInstruction: null, removeInstructionId: null };
 }
