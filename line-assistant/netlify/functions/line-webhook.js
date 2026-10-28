@@ -78,6 +78,7 @@ async function handleTextMessage(lineEvent) {
   const { data: recentMessages } = await supabase
       .from("conversation_log")
       .select("role, content, created_at")
+      .eq("line_user_id", userId) // each person only sees their own conversation
       .order("created_at", { ascending: false })
       .limit(20);
 
@@ -118,7 +119,12 @@ async function handleTextMessage(lineEvent) {
 
   // 4. Ask Claude for a reply, plus a structured decision on whether this
   // message adds, removes, or doesn't touch a standing instruction.
+  const speakerText =
+        userId === process.env.LINE_USER_ID
+          ? "You are talking with Mark, your owner."
+          : "You are talking with Mark's wife, not Mark. Treat her as a trusted family member.";
   const { reply, newInstruction, removeInstructionId } = await callClaude(
+        speakerText,
         history,
         userText,
         openItemsText,
@@ -217,9 +223,16 @@ async function getUpcomingCalendarEvents() {
   }
 }
 
-async function callClaude(history, userText, openItemsText, standingInstructionsText, calendarEventsText) {
-    const systemPrompt = `You are Mark's personal assistant, talking to him over LINE.
-    Be direct and concise — match his preference for short, clear replies, no fluff.
+async function callClaude(speakerText, history, userText, openItemsText, standingInstructionsText, calendarEventsText) {
+    const systemPrompt = `You are Mark's personal assistant, available over LINE.
+    ${speakerText}
+    Be direct and concise — short, clear replies, no fluff.
+
+    LANGUAGE: Always reply in the language of the person's LATEST message
+    (English or Thai). If they explicitly ask for a language ("English please",
+    "ตอบเป็นภาษาไทย"), switch immediately and keep using it until they ask
+    otherwise. Ignore the language of earlier assistant messages in the
+    conversation history — they must never decide the language of your reply.
 
     Currently open/flagged items you raised earlier:
     ${openItemsText}
