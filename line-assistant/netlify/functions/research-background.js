@@ -16,13 +16,34 @@ const supabase = createClient(
   );
 
 exports.handler = async () => {
+  const { data: rows } = await supabase.from("users").select("*");
+  const users = rows || [];
+  if (LINE_USER_ID && !users.some((u) => u.line_user_id === LINE_USER_ID)) {
+    users.push({ line_user_id: LINE_USER_ID, name: "Mark", is_owner: true });
+  }
+  // Background function: 15 min budget, so people are handled one at a time.
+  for (const user of users) {
+    try {
+      await researchForUser(user);
+    } catch (err) {
+      console.error(`Research failed for ${user.name}:`, err.message);
+    }
+  }
+};
+
+async function researchForUser(user) {
   const { data: instructions, error } = await supabase
-  .from("standing_instructions")
-  .select("id, instruction")
-  .eq("status", "active")
-  .order("created_at", { ascending: false });
+    .from("standing_instructions")
+    .select("id, instruction")
+    .eq("status", "active")
+    .or(
+      user.is_owner
+        ? `line_user_id.eq.${user.line_user_id},line_user_id.is.null`
+        : `line_user_id.eq.${user.line_user_id}`
+    )
+    .order("created_at", { ascending: false });
   if (error || !instructions || instructions.length === 0) {
-    console.log("No standing instructions to review.");
+    console.log(`${user.name}: no standing instructions to review.`);
     return;
   }
 
@@ -33,6 +54,7 @@ exports.handler = async () => {
   .from("flagged_items")
   .select("summary, created_at")
   .like("summary", "[research]%")
+  .eq("line_user_id", user.line_user_id)
   .gte("created_at", since)
   .order("created_at", { ascending: false });
 
@@ -65,15 +87,15 @@ exports.handler = async () => {
       model: "claude-sonnet-4-6",
       max_tokens: 3000,
       tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 6 }],
-      system: `You run Mark's research-type standing instructions. The current date/time in Bangkok is: ${nowText}.
+      system: `You run ${user.name}'s research-type standing instructions. The current date/time in Bangkok is: ${nowText}.
 
-      Go through the standing instructions and handle ONLY those that need live research or are tied to a specific calendar date/period (e.g. a monthly business-opportunity search, trade-show reminders such as "every July" or "the day before the show"). Ignore simple recurring chores (e.g. garbage day) and anything scoped to "when Mark messages in" — other systems handle those.
+      Go through the standing instructions and handle ONLY those that need live research or are tied to a specific calendar date/period (e.g. a monthly business-opportunity search, trade-show reminders such as "every July" or "the day before the show"). Ignore simple recurring chores (e.g. garbage day) and anything scoped to "when ${user.name} messages in" — other systems handle those.
 
       For each research-type instruction, decide whether it is due TODAY:
       - Monthly reports: due if nothing was reported for it in the past 45 days list below, or the last report was in a previous calendar month. Never send the same monthly report twice in one month.
       - Date-specific reminders: due only if today actually matches (right month, or exactly the day before an event). If due, use web search to confirm exact dates/venues.
 
-      If nothing is due, do NOT use web search; reply shouldNotify false. If something is due, do the research, and write ONE concise LINE message (plain text, no markdown) with the findings. Don't repeat items already reported.
+      If nothing is due, do NOT use web search; reply shouldNotify false. If something is due, do the research, and write ONE concise LINE message (plain text, no markdown) with the findings. Don't repeat items already reported. Write the message in the language ${user.name} normally uses with you (default English).
 
       Reply with ONLY JSON as your final message, no preamble, no code fences:
       {"shouldNotify": boolean, "message": "LINE message", "flaggedSummaries": ["short summary, e.g. which franchises were reported"]}`,
@@ -107,12 +129,12 @@ exports.handler = async () => {
   for (const s of result.flaggedSummaries || []) {
     await supabase
     .from("flagged_items")
-    .insert({ summary: `[research] ${s}`, status: "open" });
+    .insert({ summary: `[research] ${s}`, status: "open", line_user_id: user.line_user_id });
   }
   await supabase.from("conversation_log").insert({
     role: "assistant",
     content: result.message,
-    line_user_id: LINE_USER_ID,
+    line_user_id: user.line_user_id,
   });
   const push = await fetch("https://api.line.me/v2/bot/message/push", {
     method: "POST",
@@ -121,9 +143,9 @@ exports.handler = async () => {
       Authorization: `Bearer ${LINE_CHANNEL_ACCESS_TOKEN}`,
     },
     body: JSON.stringify({
-      to: LINE_USER_ID,
+      to: user.line_user_id,
       messages: [{ type: "text", text: result.message.slice(0, 4900) }],
     }),
   });
-  console.log("Research pushed to LINE, status:", push.status);
-};
+  console.log(`Research pushed to ${user.name}, status:`, push.status);
+}

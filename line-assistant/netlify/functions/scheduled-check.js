@@ -16,48 +16,76 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 // Google Calendar (OAuth refresh-token flow — see README for setup)
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
-const GOOGLE_REFRESH_TOKEN = process.env.GOOGLE_REFRESH_TOKEN;
-const GOOGLE_CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID || "primary";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 exports.handler = async () => {
-  // 1. Gather source data: standing instructions + calendar (extend here
-  // with more sources later — Gmail, other connectors, etc).
-  const standingInstructions = await getStandingInstructions();
-  const calendarEvents = await getUpcomingCalendarEvents();
-  const sentToday = await getSentToday();
-
-  if (standingInstructions.length === 0 && calendarEvents.length === 0) {
-    console.log("Nothing to review this run.");
-    return { statusCode: 200, body: "No data" };
+  const users = await getUsers();
+  if (users.length === 0) {
+    console.log("No users.");
+    return { statusCode: 200, body: "No users" };
   }
 
-  // 2. Ask Claude what's worth flagging
+  // Each person is checked independently, in parallel (scheduled functions
+  // have a tight time limit). One person's failure never blocks the others.
+  const results = await Promise.all(
+    users.map((u) =>
+      checkUser(u).catch((err) => {
+        console.error(`Check failed for ${u.name}:`, err.message);
+        return "error";
+      })
+    )
+  );
+  return { statusCode: 200, body: results.join(",") };
+};
+
+async function getUsers() {
+  const { data, error } = await supabase.from("users").select("*");
+  if (error) {
+    console.error("Failed to load users:", error.message);
+    return [];
+  }
+  const users = data || [];
+  // Owner fallback: before the first chat message creates the owner's row,
+  // still run for the owner so nothing is missed.
+  if (LINE_USER_ID && !users.some((u) => u.line_user_id === LINE_USER_ID)) {
+    users.push({ line_user_id: LINE_USER_ID, name: "Mark", is_owner: true });
+  }
+  return users;
+}
+
+async function checkUser(user) {
+  const standingInstructions = await getStandingInstructions(user);
+  const calendarEvents = await getUpcomingCalendarEvents(user);
+  const sentToday = await getSentToday(user);
+
+  if (standingInstructions.length === 0 && calendarEvents.length === 0) {
+    console.log(`${user.name}: nothing to review.`);
+    return "no-data";
+  }
+
   const { shouldNotify, message, flaggedSummaries } = await evaluateAndDraft(
+    user,
     standingInstructions,
     calendarEvents,
     sentToday
   );
 
-  if (!shouldNotify) {
-    console.log("Nothing worth flagging this run.");
-    return { statusCode: 200, body: "Nothing to flag" };
+  if (!shouldNotify || !message) {
+    console.log(`${user.name}: nothing worth flagging.`);
+    return "quiet";
   }
 
-  // 3. Record flagged items so the webhook function has context if Mark
-  // replies to follow up later
-  for (const summary of flaggedSummaries) {
+  for (const summary of flaggedSummaries || []) {
     await supabase
       .from("flagged_items")
-      .insert({ summary, status: "open" });
+      .insert({ summary, status: "open", line_user_id: user.line_user_id });
   }
 
-  // 4. Log and push the message
   await supabase.from("conversation_log").insert({
     role: "assistant",
     content: message,
-    line_user_id: LINE_USER_ID,
+    line_user_id: user.line_user_id,
   });
 
   await fetch("https://api.line.me/v2/bot/message/push", {
@@ -67,19 +95,24 @@ exports.handler = async () => {
       Authorization: `Bearer ${LINE_CHANNEL_ACCESS_TOKEN}`,
     },
     body: JSON.stringify({
-      to: LINE_USER_ID,
-      messages: [{ type: "text", text: message }],
+      to: user.line_user_id,
+      messages: [{ type: "text", text: message.slice(0, 4900) }],
     }),
   });
 
-  return { statusCode: 200, body: "Pushed" };
-};
+  return "pushed";
+}
 
-async function getStandingInstructions() {
+async function getStandingInstructions(user) {
   const { data, error } = await supabase
     .from("standing_instructions")
     .select("id, instruction")
     .eq("status", "active")
+    .or(
+      user.is_owner
+        ? `line_user_id.eq.${user.line_user_id},line_user_id.is.null`
+        : `line_user_id.eq.${user.line_user_id}`
+    )
     .order("created_at", { ascending: false });
 
   if (error) {
@@ -92,7 +125,7 @@ async function getStandingInstructions() {
 // Everything the assistant has already said to Mark since midnight Bangkok
 // time, so frequency limits like "once per day" can actually be honored
 // (each run is otherwise stateless).
-async function getSentToday() {
+async function getSentToday(user) {
   const day = new Date().toLocaleDateString("en-CA", {
     timeZone: "Asia/Bangkok",
   });
@@ -101,6 +134,7 @@ async function getSentToday() {
     .from("conversation_log")
     .select("content, created_at")
     .eq("role", "assistant")
+    .eq("line_user_id", user.line_user_id)
     .gte("created_at", since)
     .order("created_at", { ascending: true });
 
@@ -111,7 +145,15 @@ async function getSentToday() {
   return data || [];
 }
 
-async function getUpcomingCalendarEvents() {
+async function getUpcomingCalendarEvents(user) {
+  const GOOGLE_REFRESH_TOKEN =
+    user.google_refresh_token ||
+    (user.is_owner ? process.env.GOOGLE_REFRESH_TOKEN : null);
+  const GOOGLE_CALENDAR_ID =
+    user.google_calendar_id ||
+    (user.is_owner ? process.env.GOOGLE_CALENDAR_ID : null) ||
+    "primary";
+
   // Calendar is optional — if credentials aren't set up yet, skip quietly
   // rather than failing the whole run.
   if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REFRESH_TOKEN) {
@@ -167,7 +209,7 @@ async function getUpcomingCalendarEvents() {
   }
 }
 
-async function evaluateAndDraft(standingInstructions, calendarEvents, sentToday) {
+async function evaluateAndDraft(user, standingInstructions, calendarEvents, sentToday) {
   const instructionsText =
     standingInstructions.map((i) => `- ${i.instruction}`).join("\n") ||
     "(none)";
@@ -207,7 +249,7 @@ async function evaluateAndDraft(standingInstructions, calendarEvents, sentToday)
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
       max_tokens: 500,
-      system: `You review information on Mark's behalf and decide if anything
+      system: `You review information on ${user.name}'s behalf and decide if anything
 needs his attention right now. Be conservative — only flag things that are
 genuinely actionable or time-sensitive.
 
@@ -217,29 +259,32 @@ standing instruction that's conditional on a day of week, date, or month
 actually matches.
 
 This check runs three times a day. Below you're given the messages already
-sent to Mark today. Honor any frequency limit in a standing instruction
+sent to ${user.name} today. Honor any frequency limit in a standing instruction
 (e.g. "once per day", "only once", "weekly"): if that reminder already went
 out in today's messages, do NOT send it again. In general, never repeat
 something already delivered today unless it has materially changed.
 
 Note: this scheduled check runs on a tight time budget (no web search here —
-that's only available when Mark messages the bot directly in LINE). Judge
+that's only available when ${user.name} messages the bot directly in LINE). Judge
 only from the standing instructions and calendar events given below; if a
 standing instruction needs a live lookup to evaluate, leave it unflagged
-here and let Mark ask about it directly instead.
+here and let ${user.name} ask about it directly instead.
+
+Write the message in the language ${user.name} normally uses with you (see any
+standing instruction or earlier messages; default English).
 
 Reply with ONLY JSON as your final message, no preamble, no markdown fences:
 {"shouldNotify": boolean, "message": "the LINE message to send, direct and concise", "flaggedSummaries": ["short summary 1", ...]}`,
       messages: [
         {
           role: "user",
-          content: `Standing things Mark has asked you to watch for:
+          content: `Standing things ${user.name} has asked you to watch for:
 ${instructionsText}
 
 Calendar events in the next 24 hours:
 ${eventsText}
 
-Messages already sent to Mark today (Bangkok time):
+Messages already sent to ${user.name} today (Bangkok time):
 ${sentText}`,
         },
       ],
@@ -249,7 +294,8 @@ ${sentText}`,
   const data = await response.json();
   const textBlock = (data.content || []).find((b) => b.type === "text");
   try {
-    return JSON.parse(textBlock.text);
+    const raw = textBlock.text;
+    return JSON.parse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1));
   } catch {
     return { shouldNotify: false, message: "", flaggedSummaries: [] };
   }
